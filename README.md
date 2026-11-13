@@ -139,19 +139,33 @@ fsync: up and running.
 
 ---
 
-## 🦾 arm64 (experimental)
+## 🦾 Architecture and runtime choice
 
-GE-Proton only publishes x86_64 builds, so on an arm64 (aarch64) machine `proton-cli install` stops with an explicit error. Two environment variables let you work around this:
+`proton-cli install` detects the machine architecture and picks a matching runtime:
 
-* `PROTON_RUNTIME_URL` — URL of a Proton `.tar.gz` to install instead of GE-Proton. The archive must contain `proton` and `files/bin/wine`, and the Wine binary must be arm64 (`ARM aarch64`).
-* `PROTON_WRAPPER` — a command placed in front of Proton at launch, for example an emulator such as FEX-Emu or box64 when running an **x86_64** runtime on arm64.
+| Host | Default source | Runtime |
+|---|---|---|
+| x86_64 | GE-Proton | `GE-Proton*-x86_64` |
+| aarch64 (arm64) | [DroidDeck-Proton](https://github.com/Droid-Deck/DroidDeck-Proton/releases) | `DroidDeck-Proton-*-aarch64` |
 
 ```bash
-PROTON_RUNTIME_URL="https://example.com/Proton-arm64.tar.gz" ./proton-cli install
-PROTON_WRAPPER="box64" ./proton-cli run /path/to/game.exe
+./proton-cli install                 # auto: detects x86_64 or aarch64
+./proton-cli install ge              # GE-Proton (x86_64 only)
+./proton-cli install droiddeck       # DroidDeck-Proton (arm64 only)
+./proton-cli list                    # installed runtimes, default marked
+./proton-cli use <runtime>           # choose the runtime used by `run`
 ```
 
-`proton-cli doctor` shows both overrides. This path has been tested only with a fake archive on x86_64; it has **not** been validated on a real arm64 machine.
+The chosen runtime is stored in `~/.config/proton-cli/runtime`. The most recently installed runtime becomes the default. The DroidDeck archive is checked against its `.sha512sum` file before extraction.
+
+Other options:
+
+* `PROTON_RUNTIME_URL` — install a specific Proton `.tar.gz` instead of a source. It must contain `proton` and `files/bin/wine`, and the Wine binary must match the host architecture.
+* `PROTON_WRAPPER` — a command placed in front of Proton at launch, for example FEX-Emu or box64 to run an **x86_64** runtime on arm64. `run` warns when an x86_64 runtime is selected on arm64 without it.
+
+`proton-cli doctor` shows the default runtime and both overrides.
+
+> The arm64 path has only been tested with fake archives and a simulated architecture on x86_64. It has **not** been validated with a real DroidDeck-Proton install on an arm64 machine.
 
 ---
 

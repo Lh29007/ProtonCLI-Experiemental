@@ -2,7 +2,7 @@
 
 set -eu
 
-VERSION="0.5.2"
+VERSION="0.6.0-exp"
 
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
     REAL_USER="$SUDO_USER"
@@ -26,6 +26,9 @@ GAMES="$BASE/games"
 CACHE="$BASE/cache"
 LOGS="$BASE/logs"
 
+GE_API="${PROTON_GE_API:-https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest}"
+DD_API="${PROTON_DROIDDECK_API:-https://api.github.com/repos/Droid-Deck/DroidDeck-Proton/releases/latest}"
+
 die()
 {
     echo ""
@@ -46,16 +49,19 @@ usage()
     echo ""
     echo "Usage:"
     echo ""
-    echo "  proton-cli install"
-    echo "      Install the latest compatible GE-Proton"
-    echo "      Set PROTON_RUNTIME_URL=<archive.tar.gz> to install another"
-    echo "      Proton build (required on arm64, where GE-Proton has no build)"
+    echo "  proton-cli install [auto|ge|droiddeck]"
+    echo "      Install a Proton runtime and make it the default."
+    echo "      auto       (default) arm64 -> DroidDeck-Proton, x86_64 -> GE-Proton"
+    echo "      ge         GE-Proton (x86_64 only)"
+    echo "      droiddeck  DroidDeck-Proton (arm64 only)"
+    echo "      PROTON_RUNTIME_URL=<archive.tar.gz> installs a specific archive"
+    echo "      instead of either source."
     echo ""
-    echo "  Environment:"
-    echo "      PROTON_WRAPPER=<cmd>  launch Proton through <cmd> (e.g. FEX-Emu, box64)"
+    echo "  proton-cli use <runtime>"
+    echo "      Choose the runtime used by 'run' (see: proton-cli list)"
     echo ""
-    echo "  proton-cli update"
-    echo "      Update GE-Proton"
+    echo "  proton-cli update [auto|ge|droiddeck]"
+    echo "      Install the latest build from a source"
     echo ""
     echo "  proton-cli list"
     echo "      List installed runtimes and prefixes"
@@ -64,7 +70,7 @@ usage()
     echo "      Remove a runtime"
     echo ""
     echo "  proton-cli run <game.exe> [arguments]"
-    echo "      Run a Windows program with Proton"
+    echo "      Run a Windows program with the default runtime"
     echo ""
     echo "  proton-cli prefix <name>"
     echo "      Create a Proton prefix"
@@ -77,6 +83,9 @@ usage()
     echo ""
     echo "  proton-cli uninstall"
     echo "      Remove Proton-CLI completely"
+    echo ""
+    echo "Environment:"
+    echo "      PROTON_WRAPPER=<cmd>  launch Proton through <cmd> (e.g. FEX-Emu, box64)"
 }
 
 init_dirs()
@@ -106,8 +115,28 @@ detect_arch()
     esac
 }
 
+default_runtime_name()
+{
+    if [ -f "$CONFIG/runtime" ]; then
+        head -n 1 "$CONFIG/runtime"
+    fi
+}
+
+set_default_runtime()
+{
+    init_dirs
+    printf '%s\n' "$1" > "$CONFIG/runtime"
+}
+
 find_runtime()
 {
+    DEFAULT_NAME="$(default_runtime_name)"
+
+    if [ -n "$DEFAULT_NAME" ] && [ -f "$RUNTIMES/$DEFAULT_NAME/proton" ]; then
+        printf '%s\n' "$RUNTIMES/$DEFAULT_NAME"
+        return 0
+    fi
+
     for runtime in "$RUNTIMES"/*
     do
         if [ -f "$runtime/proton" ]; then
@@ -117,6 +146,47 @@ find_runtime()
     done
 
     return 1
+}
+
+# Download a GitHub API response to a file, or stop with an error.
+fetch_release_json()
+{
+    if ! curl \
+        --fail \
+        --location \
+        --show-error \
+        --silent \
+        --retry 3 \
+        --connect-timeout 15 \
+        --output "$2" \
+        "$1"
+    then
+        rm -f "$2"
+        die "Unable to contact GitHub ($1)."
+    fi
+
+    if [ ! -s "$2" ]; then
+        rm -f "$2"
+        die "GitHub returned an empty response."
+    fi
+}
+
+# Print the tag_name of a release JSON file.
+release_tag()
+{
+    sed -n \
+        's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$1" |
+    head -n 1 || true
+}
+
+# Print the first download URL of a release JSON file matching a regex.
+release_asset()
+{
+    grep -o '"browser_download_url":[[:space:]]*"[^"]*"' "$1" |
+    sed 's/.*"\(http[^"]*\)"$/\1/' |
+    grep -Ei "$2" |
+    head -n 1 || true
 }
 
 install_ge()
@@ -137,6 +207,7 @@ install_ge()
     init_dirs
 
     ARCH_NAME="$(detect_arch)"
+    SOURCE="${1:-auto}"
 
     echo ""
     echo "======================================"
@@ -144,18 +215,14 @@ install_ge()
     echo "======================================"
     echo ""
     echo "[+] Architecture : $ARCH_NAME"
-    echo "[+] Searching for compatible GE-Proton..."
-    echo ""
-
-    API="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
-    JSON="$CACHE/ge-proton.json"
 
     URL=""
     TAG=""
+    SHA_URL=""
 
     if [ -n "${PROTON_RUNTIME_URL:-}" ]; then
-        # Explicit Proton archive (e.g. an arm64 build). Skips the GE-Proton
-        # lookup; the architecture is still checked after extraction.
+        # Explicit archive. Skips the source lookup; the architecture is
+        # still checked after extraction.
         URL="$PROTON_RUNTIME_URL"
         TAG="custom"
 
@@ -163,67 +230,59 @@ install_ge()
         echo "    $URL"
         echo ""
     else
+        if [ "$SOURCE" = "auto" ]; then
+            if [ "$ARCH_NAME" = "aarch64" ]; then
+                SOURCE="droiddeck"
+            else
+                SOURCE="ge"
+            fi
+        fi
+
+        case "$SOURCE" in
+            ge)
+                if [ "$ARCH_NAME" = "aarch64" ]; then
+                    die "GE-Proton has no arm64 build. Use: proton-cli install droiddeck"
+                fi
+                ;;
+            droiddeck)
+                if [ "$ARCH_NAME" != "aarch64" ]; then
+                    die "DroidDeck-Proton is arm64 only. Use: proton-cli install ge"
+                fi
+                ;;
+            *)
+                die "Unknown source: $SOURCE (use auto, ge or droiddeck)"
+                ;;
+        esac
+
+        echo "[+] Source       : $SOURCE"
+        echo ""
         echo "[+] Contacting GitHub..."
 
-        if ! curl \
-            --fail \
-            --location \
-            --show-error \
-            --silent \
-            --retry 3 \
-            --connect-timeout 15 \
-            --output "$JSON" \
-            "$API"
-        then
-            rm -f "$JSON"
-            die "Unable to contact GitHub."
-        fi
+        if [ "$SOURCE" = "droiddeck" ]; then
+            JSON="$CACHE/droiddeck.json"
+            fetch_release_json "$DD_API" "$JSON"
 
-        if [ ! -s "$JSON" ]; then
-            rm -f "$JSON"
-            die "GitHub returned an empty response."
-        fi
+            TAG="$(release_tag "$JSON")"
+            [ -n "$TAG" ] || die "Unable to determine the latest DroidDeck-Proton version."
 
-        TAG="$(
-            sed -n \
-                's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                "$JSON" |
-            head -n 1
-        )"
+            URL="$(release_asset "$JSON" 'aarch64\.tar\.gz$')"
+            SHA_URL="$(release_asset "$JSON" 'aarch64\.sha512sum$')"
 
-        if [ -z "$TAG" ]; then
-            die "Unable to determine the latest GE-Proton version."
+            [ -n "$URL" ] || die "No DroidDeck-Proton arm64 archive in release $TAG."
+        else
+            JSON="$CACHE/ge-proton.json"
+            fetch_release_json "$GE_API" "$JSON"
+
+            TAG="$(release_tag "$JSON")"
+            [ -n "$TAG" ] || die "Unable to determine the latest GE-Proton version."
+
+            URL="$(release_asset "$JSON" 'GE-Proton.*(x86_64|amd64).*\.tar\.gz$')"
+
+            [ -n "$URL" ] || die "No GE-Proton x86_64 archive in release $TAG."
         fi
 
         echo "[+] Latest version : $TAG"
         echo ""
-
-        if [ "$ARCH_NAME" = "x86_64" ]; then
-            URL="$(
-                sed -n \
-                    's/.*"browser_download_url":[[:space:]]*"\([^"]*\.tar\.gz\)".*/\1/p' \
-                    "$JSON" |
-                grep -Ei 'GE-Proton.*(x86_64|amd64).*\.tar\.gz$' |
-                head -n 1 || true
-            )"
-        fi
-
-        if [ "$ARCH_NAME" = "aarch64" ]; then
-            URL="$(
-                sed -n \
-                    's/.*"browser_download_url":[[:space:]]*"\([^"]*\.tar\.gz\)".*/\1/p' \
-                    "$JSON" |
-                grep -Ei 'GE-Proton.*(aarch64|arm64).*\.tar\.gz$' |
-                head -n 1 || true
-            )"
-        fi
-
-        if [ -z "$URL" ]; then
-            if [ "$ARCH_NAME" = "aarch64" ]; then
-                die "No GE-Proton arm64 build is published. Set PROTON_RUNTIME_URL to an arm64 Proton .tar.gz and run again."
-            fi
-            die "No GE-Proton archive compatible with $ARCH_NAME was found."
-        fi
     fi
 
     if [ -z "$URL" ]; then
@@ -275,6 +334,39 @@ install_ge()
     if [ ! -s "$ARCHIVE" ]; then
         rm -f "$ARCHIVE"
         die "Downloaded archive is empty."
+    fi
+
+    if [ -n "$SHA_URL" ]; then
+        if command -v sha512sum >/dev/null 2>&1; then
+            SHA_FILE="$CACHE/$FILE.sha512sum"
+
+            echo "[+] Downloading checksum..."
+
+            if ! curl \
+                --fail \
+                --location \
+                --show-error \
+                --silent \
+                --retry 3 \
+                --connect-timeout 15 \
+                --output "$SHA_FILE" \
+                "$SHA_URL"
+            then
+                rm -f "$SHA_FILE"
+                die "Checksum download failed."
+            fi
+
+            echo "[+] Verifying checksum..."
+
+            if ! (cd "$CACHE" && sha512sum -c "$FILE.sha512sum" >/dev/null 2>&1); then
+                rm -f "$ARCHIVE" "$SHA_FILE"
+                die "Checksum mismatch. The archive was removed; run install again."
+            fi
+
+            echo "[OK] Checksum matches."
+        else
+            echo "[!] sha512sum not found: checksum not verified."
+        fi
     fi
 
     echo ""
@@ -340,21 +432,48 @@ install_ge()
     chmod +x "$DEST/proton"
     chmod +x "$WINE"
 
+    set_default_runtime "$NAME"
+
     echo ""
     echo "======================================"
-    echo "       GE-Proton installed!"
+    echo "       Proton runtime installed!"
     echo "======================================"
     echo ""
     echo "Version      : $TAG"
     echo "Architecture : $ARCH_NAME"
-    echo "Runtime      : $NAME"
+    echo "Runtime      : $NAME (default)"
     echo "Path         : $DEST"
     echo ""
 }
 
 update_ge()
 {
-    install_ge
+    install_ge "${1:-auto}"
+}
+
+use_runtime()
+{
+    NAME="${1:-}"
+
+    if [ -z "$NAME" ]; then
+        die "Usage: proton-cli use <runtime>"
+    fi
+
+    case "$NAME" in
+        *..*|/*)
+            die "Invalid runtime name."
+            ;;
+    esac
+
+    if [ ! -f "$RUNTIMES/$NAME/proton" ]; then
+        die "Runtime not found: $NAME (see: proton-cli list)"
+    fi
+
+    set_default_runtime "$NAME"
+
+    echo ""
+    echo "[OK] Default runtime: $NAME"
+    echo ""
 }
 
 remove_runtime()
@@ -381,6 +500,11 @@ remove_runtime()
     echo "[+] Removing: $NAME"
 
     rm -rf "$TARGET"
+
+    if [ "$(default_runtime_name)" = "$NAME" ]; then
+        rm -f "$CONFIG/runtime"
+        echo "[+] It was the default runtime; no default is set now."
+    fi
 
     echo "[OK] Runtime removed."
 }
@@ -437,6 +561,15 @@ run_game()
 
     if [ -z "$RUNTIME" ]; then
         die "No Proton runtime installed. Run: proton-cli install"
+    fi
+
+    if [ "$(detect_arch)" = "aarch64" ] && [ -z "${PROTON_WRAPPER:-}" ]; then
+        case "$(basename "$RUNTIME")" in
+            *x86_64*|*x64*|*amd64*)
+                echo "[!] x86_64 runtime on arm64 without PROTON_WRAPPER: it will likely fail."
+                echo ""
+                ;;
+        esac
     fi
 
     if command -v realpath >/dev/null 2>&1; then
@@ -502,6 +635,8 @@ list_all()
 {
     init_dirs
 
+    DEFAULT_NAME="$(default_runtime_name)"
+
     echo ""
     echo "======================================"
     echo " Proton-CLI"
@@ -520,7 +655,12 @@ list_all()
     for runtime in "$RUNTIMES"/*
     do
         if [ -f "$runtime/proton" ]; then
-            echo "  [OK] $(basename "$runtime")"
+            RNAME="$(basename "$runtime")"
+            MARK=""
+            if [ "$RNAME" = "$DEFAULT_NAME" ]; then
+                MARK=" (default)"
+            fi
+            echo "  [OK] $RNAME$MARK"
             FOUND=1
         fi
     done
@@ -581,7 +721,7 @@ doctor()
     echo "Commands:"
     echo ""
 
-    for command in curl tar gzip file git
+    for command in curl tar gzip file git sha512sum
     do
         if command -v "$command" >/dev/null 2>&1; then
             echo "  [OK] $command"
@@ -600,17 +740,19 @@ doctor()
         echo "  [ABSENT] No runtime"
     fi
 
+    echo "  Default  : $(default_runtime_name || true)"
+
     echo ""
     echo "Overrides:"
     echo ""
-    echo "  PROTON_RUNTIME_URL : ${PROTON_RUNTIME_URL:-<unset, GE-Proton lookup>}"
+    echo "  PROTON_RUNTIME_URL : ${PROTON_RUNTIME_URL:-<unset, source lookup>}"
     echo "  PROTON_WRAPPER     : ${PROTON_WRAPPER:-<unset>}"
 
     if [ "$ARCH_NAME" = "aarch64" ]; then
         echo ""
-        echo "Note: arm64 host. GE-Proton has no arm64 build, so install needs"
-        echo "PROTON_RUNTIME_URL. An x86_64 runtime also needs PROTON_WRAPPER"
-        echo "(FEX-Emu or box64). This path is experimental and untested."
+        echo "Note: arm64 host. 'install' uses DroidDeck-Proton by default."
+        echo "An x86_64 runtime also needs PROTON_WRAPPER (FEX-Emu or box64)."
+        echo "The arm64 path is experimental and untested on real hardware."
     fi
 
     echo ""
@@ -670,11 +812,18 @@ COMMAND="${1:-help}"
 
 case "$COMMAND" in
     install)
-        install_ge
+        shift
+        install_ge "$@"
         ;;
 
     update)
-        update_ge
+        shift
+        update_ge "$@"
+        ;;
+
+    use)
+        shift
+        use_runtime "$@"
         ;;
 
     remove)

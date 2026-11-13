@@ -6,11 +6,11 @@ set -eu
 
 # PROTON-CLI INSTALLER
 
-# Version 0.5.2
+# Version 0.6.0-exp
 
 # ============================================================
 
-VERSION="0.5.2"
+VERSION="0.6.0-exp"
 
 REPO="Lh29007/ProtonCLI-Experiemental"
 RAW_URL="https://raw.githubusercontent.com/Lh29007/ProtonCLI-Experiemental/main/proton-cli"
