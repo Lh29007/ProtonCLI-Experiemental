@@ -1,0 +1,65 @@
+# Proton runtimes
+runtimes/
+proton/
+proton-runtimes/
+
+# Wine / Proton prefixes
+prefixes/
+prefix/
+compatdata/
+
+# Téléchargements et archives
+cache/
+downloads/
+*.tar.gz
+*.tar.xz
+*.zip
+*.7z
+
+# Logs
+logs/
+*.log
+
+# Configurations locales
+config/
+*.local
+.env
+.env.*
+
+# Jeux / fichiers locaux
+games/
+*.exe
+*.msi
+
+# Cache / fichiers temporaires
+tmp/
+temp/
+*.tmp
+*.cache
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Shell backups
+*~
+*.bak
+
+# Secrets
+*.key
+*.pem
+credentials*

@@ -1,0 +1,721 @@
+#!/bin/sh
+
+set -eu
+
+VERSION="0.5.2"
+
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    REAL_USER="$SUDO_USER"
+    REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+else
+    REAL_USER="$(id -un)"
+    REAL_HOME="$HOME"
+fi
+
+if [ -z "$REAL_HOME" ]; then
+    echo "proton-cli: unable to determine HOME."
+    exit 1
+fi
+
+BASE="$REAL_HOME/.local/share/proton-cli"
+CONFIG="$REAL_HOME/.config/proton-cli"
+
+RUNTIMES="$BASE/runtimes"
+PREFIXES="$BASE/prefixes"
+GAMES="$BASE/games"
+CACHE="$BASE/cache"
+LOGS="$BASE/logs"
+
+die()
+{
+    echo ""
+    echo "proton-cli: $*" >&2
+    exit 1
+}
+
+require()
+{
+    if ! command -v "$1" >/dev/null 2>&1; then
+        die "Required command not found: $1"
+    fi
+}
+
+usage()
+{
+    echo "Proton-CLI $VERSION"
+    echo ""
+    echo "Usage:"
+    echo ""
+    echo "  proton-cli install"
+    echo "      Install the latest compatible GE-Proton"
+    echo "      Set PROTON_RUNTIME_URL=<archive.tar.gz> to install another"
+    echo "      Proton build (required on arm64, where GE-Proton has no build)"
+    echo ""
+    echo "  Environment:"
+    echo "      PROTON_WRAPPER=<cmd>  launch Proton through <cmd> (e.g. FEX-Emu, box64)"
+    echo ""
+    echo "  proton-cli update"
+    echo "      Update GE-Proton"
+    echo ""
+    echo "  proton-cli list"
+    echo "      List installed runtimes and prefixes"
+    echo ""
+    echo "  proton-cli remove <runtime>"
+    echo "      Remove a runtime"
+    echo ""
+    echo "  proton-cli run <game.exe> [arguments]"
+    echo "      Run a Windows program with Proton"
+    echo ""
+    echo "  proton-cli prefix <name>"
+    echo "      Create a Proton prefix"
+    echo ""
+    echo "  proton-cli doctor"
+    echo "      Check the system"
+    echo ""
+    echo "  proton-cli version"
+    echo "      Display the version"
+    echo ""
+    echo "  proton-cli uninstall"
+    echo "      Remove Proton-CLI completely"
+}
+
+init_dirs()
+{
+    mkdir -p "$RUNTIMES"
+    mkdir -p "$PREFIXES"
+    mkdir -p "$GAMES"
+    mkdir -p "$CACHE"
+    mkdir -p "$LOGS"
+    mkdir -p "$CONFIG"
+}
+
+detect_arch()
+{
+    ARCH="$(uname -m)"
+
+    case "$ARCH" in
+        x86_64|amd64)
+            echo "x86_64"
+            ;;
+        aarch64|arm64)
+            echo "aarch64"
+            ;;
+        *)
+            die "Unsupported architecture: $ARCH"
+            ;;
+    esac
+}
+
+find_runtime()
+{
+    for runtime in "$RUNTIMES"/*
+    do
+        if [ -f "$runtime/proton" ]; then
+            printf '%s\n' "$runtime"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+install_ge()
+{
+    require curl
+    require tar
+    require gzip
+    require grep
+    require sed
+    require head
+    require basename
+    require mkdir
+    require rm
+    require uname
+    require chmod
+    require find
+
+    init_dirs
+
+    ARCH_NAME="$(detect_arch)"
+
+    echo ""
+    echo "======================================"
+    echo " Proton-CLI Runtime Installer"
+    echo "======================================"
+    echo ""
+    echo "[+] Architecture : $ARCH_NAME"
+    echo "[+] Searching for compatible GE-Proton..."
+    echo ""
+
+    API="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
+    JSON="$CACHE/ge-proton.json"
+
+    URL=""
+    TAG=""
+
+    if [ -n "${PROTON_RUNTIME_URL:-}" ]; then
+        # Explicit Proton archive (e.g. an arm64 build). Skips the GE-Proton
+        # lookup; the architecture is still checked after extraction.
+        URL="$PROTON_RUNTIME_URL"
+        TAG="custom"
+
+        echo "[+] Using PROTON_RUNTIME_URL override:"
+        echo "    $URL"
+        echo ""
+    else
+        echo "[+] Contacting GitHub..."
+
+        if ! curl \
+            --fail \
+            --location \
+            --show-error \
+            --silent \
+            --retry 3 \
+            --connect-timeout 15 \
+            --output "$JSON" \
+            "$API"
+        then
+            rm -f "$JSON"
+            die "Unable to contact GitHub."
+        fi
+
+        if [ ! -s "$JSON" ]; then
+            rm -f "$JSON"
+            die "GitHub returned an empty response."
+        fi
+
+        TAG="$(
+            sed -n \
+                's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+                "$JSON" |
+            head -n 1
+        )"
+
+        if [ -z "$TAG" ]; then
+            die "Unable to determine the latest GE-Proton version."
+        fi
+
+        echo "[+] Latest version : $TAG"
+        echo ""
+
+        if [ "$ARCH_NAME" = "x86_64" ]; then
+            URL="$(
+                sed -n \
+                    's/.*"browser_download_url":[[:space:]]*"\([^"]*\.tar\.gz\)".*/\1/p' \
+                    "$JSON" |
+                grep -Ei 'GE-Proton.*(x86_64|amd64).*\.tar\.gz$' |
+                head -n 1 || true
+            )"
+        fi
+
+        if [ "$ARCH_NAME" = "aarch64" ]; then
+            URL="$(
+                sed -n \
+                    's/.*"browser_download_url":[[:space:]]*"\([^"]*\.tar\.gz\)".*/\1/p' \
+                    "$JSON" |
+                grep -Ei 'GE-Proton.*(aarch64|arm64).*\.tar\.gz$' |
+                head -n 1 || true
+            )"
+        fi
+
+        if [ -z "$URL" ]; then
+            if [ "$ARCH_NAME" = "aarch64" ]; then
+                die "No GE-Proton arm64 build is published. Set PROTON_RUNTIME_URL to an arm64 Proton .tar.gz and run again."
+            fi
+            die "No GE-Proton archive compatible with $ARCH_NAME was found."
+        fi
+    fi
+
+    if [ -z "$URL" ]; then
+        die "No Proton archive URL available for $ARCH_NAME."
+    fi
+
+    FILE="$(basename "$URL")"
+    NAME="${FILE%.tar.gz}"
+
+    ARCHIVE="$CACHE/$FILE"
+    DEST="$RUNTIMES/$NAME"
+
+    echo "[+] Archive     : $FILE"
+    echo "[+] Destination : $DEST"
+    echo ""
+
+    case "$ARCH_NAME:$FILE" in
+        x86_64:*aarch64*|x86_64:*arm64*)
+            die "An ARM archive was selected for x86_64."
+            ;;
+        aarch64:*x86_64*|aarch64:*amd64*)
+            die "An x86_64 archive was selected for aarch64."
+            ;;
+    esac
+
+    if [ -f "$ARCHIVE" ] && [ -s "$ARCHIVE" ]; then
+        echo "[+] Archive already downloaded."
+    else
+        echo "[+] Downloading..."
+        echo ""
+
+        rm -f "$ARCHIVE"
+
+        if ! curl \
+            --fail \
+            --location \
+            --show-error \
+            --silent \
+            --retry 3 \
+            --connect-timeout 15 \
+            --output "$ARCHIVE" \
+            "$URL"
+        then
+            rm -f "$ARCHIVE"
+            die "Download failed."
+        fi
+    fi
+
+    if [ ! -s "$ARCHIVE" ]; then
+        rm -f "$ARCHIVE"
+        die "Downloaded archive is empty."
+    fi
+
+    echo ""
+    echo "[+] Verifying archive..."
+
+    if ! tar -tzf "$ARCHIVE" >/dev/null 2>&1; then
+        rm -f "$ARCHIVE"
+        die "Downloaded archive is invalid."
+    fi
+
+    echo "[OK] Archive is valid."
+
+    echo "[+] Extracting..."
+
+    rm -rf "$DEST"
+    mkdir -p "$DEST"
+
+    if ! tar \
+        -xzf "$ARCHIVE" \
+        -C "$DEST" \
+        --strip-components=1
+    then
+        rm -rf "$DEST"
+        die "Extraction failed."
+    fi
+
+    if [ ! -f "$DEST/proton" ]; then
+        rm -rf "$DEST"
+        die "Proton executable not found."
+    fi
+
+    WINE="$DEST/files/bin/wine"
+
+    if [ ! -f "$WINE" ]; then
+        rm -rf "$DEST"
+        die "Wine executable not found."
+    fi
+
+    if command -v file >/dev/null 2>&1; then
+        WINE_INFO="$(file "$WINE")"
+
+        echo "[+] Wine binary:"
+        echo "    $WINE_INFO"
+        echo ""
+
+        if [ "$ARCH_NAME" = "x86_64" ]; then
+            if ! echo "$WINE_INFO" | grep -qi "x86-64"; then
+                rm -rf "$DEST"
+                die "Wine binary is not compatible with x86_64."
+            fi
+        fi
+
+        if [ "$ARCH_NAME" = "aarch64" ]; then
+            if ! echo "$WINE_INFO" | grep -qi "ARM aarch64"; then
+                rm -rf "$DEST"
+                die "Wine binary is not compatible with aarch64."
+            fi
+        fi
+
+        echo "[OK] Wine architecture matches $ARCH_NAME."
+    fi
+
+    chmod +x "$DEST/proton"
+    chmod +x "$WINE"
+
+    echo ""
+    echo "======================================"
+    echo "       GE-Proton installed!"
+    echo "======================================"
+    echo ""
+    echo "Version      : $TAG"
+    echo "Architecture : $ARCH_NAME"
+    echo "Runtime      : $NAME"
+    echo "Path         : $DEST"
+    echo ""
+}
+
+update_ge()
+{
+    install_ge
+}
+
+remove_runtime()
+{
+    NAME="${1:-}"
+
+    if [ -z "$NAME" ]; then
+        die "Usage: proton-cli remove <runtime>"
+    fi
+
+    case "$NAME" in
+        *..*|/*)
+            die "Invalid runtime name."
+            ;;
+    esac
+
+    TARGET="$RUNTIMES/$NAME"
+
+    if [ ! -d "$TARGET" ]; then
+        die "Runtime not found: $NAME"
+    fi
+
+    echo ""
+    echo "[+] Removing: $NAME"
+
+    rm -rf "$TARGET"
+
+    echo "[OK] Runtime removed."
+}
+
+create_prefix()
+{
+    NAME="${1:-}"
+
+    if [ -z "$NAME" ]; then
+        die "Usage: proton-cli prefix <name>"
+    fi
+
+    case "$NAME" in
+        *..*|/*)
+            die "Invalid prefix name."
+            ;;
+    esac
+
+    PREFIX="$PREFIXES/$NAME"
+
+    if [ -d "$PREFIX" ]; then
+        echo "[+] Prefix already exists: $NAME"
+        echo "    $PREFIX"
+        return 0
+    fi
+
+    mkdir -p "$PREFIX"
+    mkdir -p "$PREFIX/pfx"
+
+    echo ""
+    echo "======================================"
+    echo " Prefix created"
+    echo "======================================"
+    echo ""
+    echo "Name : $NAME"
+    echo "Path : $PREFIX"
+    echo ""
+}
+
+run_game()
+{
+    if [ "$#" -lt 1 ]; then
+        die "Usage: proton-cli run <game.exe> [arguments]"
+    fi
+
+    GAME="$1"
+    shift
+
+    if [ ! -f "$GAME" ]; then
+        die "File not found: $GAME"
+    fi
+
+    RUNTIME="$(find_runtime || true)"
+
+    if [ -z "$RUNTIME" ]; then
+        die "No Proton runtime installed. Run: proton-cli install"
+    fi
+
+    if command -v realpath >/dev/null 2>&1; then
+        GAME="$(realpath "$GAME")"
+    else
+        GAME="$(cd "$(dirname "$GAME")" && pwd)/$(basename "$GAME")"
+    fi
+
+    GAME_NAME="$(basename "$GAME")"
+    GAME_NAME="${GAME_NAME%.*}"
+
+    PREFIX="$PREFIXES/$GAME_NAME"
+
+    mkdir -p "$PREFIX"
+    mkdir -p "$PREFIX/pfx"
+    mkdir -p "$LOGS"
+
+    export STEAM_COMPAT_DATA_PATH="$PREFIX"
+    export STEAM_COMPAT_CLIENT_INSTALL_PATH="$BASE"
+    export WINEPREFIX="$PREFIX/pfx"
+
+    LOG="$LOGS/$GAME_NAME.log"
+
+    echo ""
+    echo "======================================"
+    echo " Proton-CLI"
+    echo "======================================"
+    echo ""
+    echo "Runtime : $(basename "$RUNTIME")"
+    echo "Game    : $GAME"
+    echo "Prefix  : $PREFIX"
+    echo "Log     : $LOG"
+    echo ""
+
+    cd "$(dirname "$GAME")"
+
+    set +e
+    if [ -n "${PROTON_WRAPPER:-}" ]; then
+        # Optional launcher placed in front of Proton, e.g. an x86 emulator
+        # such as FEX-Emu or box64 when running an x86_64 runtime on arm64.
+        # shellcheck disable=SC2086
+        $PROTON_WRAPPER "$RUNTIME/proton" run "$GAME" "$@" >"$LOG" 2>&1
+    else
+        "$RUNTIME/proton" run "$GAME" "$@" >"$LOG" 2>&1
+    fi
+    STATUS=$?
+    set -e
+
+    cat "$LOG"
+
+    echo ""
+
+    if [ "$STATUS" -eq 0 ]; then
+        echo "[OK] Program finished successfully."
+    else
+        echo "[ERROR] Proton exited with status $STATUS."
+        echo "[+] Full log: $LOG"
+        return "$STATUS"
+    fi
+}
+
+list_all()
+{
+    init_dirs
+
+    echo ""
+    echo "======================================"
+    echo " Proton-CLI"
+    echo "======================================"
+    echo ""
+
+    echo "Data:"
+    echo "  $BASE"
+    echo ""
+
+    echo "Runtimes:"
+    echo ""
+
+    FOUND=0
+
+    for runtime in "$RUNTIMES"/*
+    do
+        if [ -f "$runtime/proton" ]; then
+            echo "  [OK] $(basename "$runtime")"
+            FOUND=1
+        fi
+    done
+
+    if [ "$FOUND" -eq 0 ]; then
+        echo "  No runtime installed"
+    fi
+
+    echo ""
+    echo "Prefixes:"
+    echo ""
+
+    FOUND=0
+
+    for prefix in "$PREFIXES"/*
+    do
+        if [ -d "$prefix" ]; then
+            echo "  [OK] $(basename "$prefix")"
+            FOUND=1
+        fi
+    done
+
+    if [ "$FOUND" -eq 0 ]; then
+        echo "  No prefixes"
+    fi
+
+    echo ""
+}
+
+doctor()
+{
+    init_dirs
+
+    ARCH_NAME="$(detect_arch)"
+
+    echo ""
+    echo "======================================"
+    echo " Proton-CLI Doctor"
+    echo "======================================"
+    echo ""
+
+    echo "Version      : $VERSION"
+    echo "User         : $REAL_USER"
+    echo "HOME         : $REAL_HOME"
+    echo "Architecture : $ARCH_NAME"
+    echo ""
+
+    echo "Directories:"
+    echo ""
+    echo "  Data     : $BASE"
+    echo "  Config   : $CONFIG"
+    echo "  Cache    : $CACHE"
+    echo "  Logs     : $LOGS"
+    echo "  Prefixes : $PREFIXES"
+    echo "  Runtimes : $RUNTIMES"
+
+    echo ""
+    echo "Commands:"
+    echo ""
+
+    for command in curl tar gzip file git
+    do
+        if command -v "$command" >/dev/null 2>&1; then
+            echo "  [OK] $command"
+        else
+            echo "  [ABSENT] $command"
+        fi
+    done
+
+    echo ""
+    echo "Runtime:"
+    echo ""
+
+    if RUNTIME="$(find_runtime 2>/dev/null)"; then
+        echo "  [OK] $(basename "$RUNTIME")"
+    else
+        echo "  [ABSENT] No runtime"
+    fi
+
+    echo ""
+    echo "Overrides:"
+    echo ""
+    echo "  PROTON_RUNTIME_URL : ${PROTON_RUNTIME_URL:-<unset, GE-Proton lookup>}"
+    echo "  PROTON_WRAPPER     : ${PROTON_WRAPPER:-<unset>}"
+
+    if [ "$ARCH_NAME" = "aarch64" ]; then
+        echo ""
+        echo "Note: arm64 host. GE-Proton has no arm64 build, so install needs"
+        echo "PROTON_RUNTIME_URL. An x86_64 runtime also needs PROTON_WRAPPER"
+        echo "(FEX-Emu or box64). This path is experimental and untested."
+    fi
+
+    echo ""
+}
+
+version()
+{
+    echo "proton-cli $VERSION"
+}
+
+uninstall()
+{
+    if [ "$(id -u)" -ne 0 ]; then
+        echo ""
+        echo "[+] Administrator privileges are required."
+        echo "[+] Restarting with sudo..."
+        echo ""
+
+        exec sudo "$0" uninstall
+    fi
+
+    echo ""
+    echo "======================================"
+    echo " Proton-CLI Uninstaller"
+    echo "======================================"
+    echo ""
+
+    echo "[+] User          : $REAL_USER"
+    echo "[+] Data          : $BASE"
+    echo "[+] Configuration : $CONFIG"
+    echo ""
+
+    echo "[+] Removing Proton-CLI data..."
+
+    rm -rf "$BASE"
+    rm -rf "$CONFIG"
+
+    echo "[OK] Data removed."
+
+    echo "[+] Removing command..."
+
+    rm -f "/usr/local/bin/proton-cli"
+
+    echo "[OK] /usr/local/bin/proton-cli removed."
+
+    echo ""
+    echo "======================================"
+    echo " Proton-CLI uninstalled"
+    echo "======================================"
+    echo ""
+    echo "Steam Proton installations were not removed."
+    echo "Your Steam games were not removed."
+    echo ""
+}
+
+COMMAND="${1:-help}"
+
+case "$COMMAND" in
+    install)
+        install_ge
+        ;;
+
+    update)
+        update_ge
+        ;;
+
+    remove)
+        shift
+        remove_runtime "$@"
+        ;;
+
+    run)
+        shift
+        run_game "$@"
+        ;;
+
+    prefix)
+        shift
+        create_prefix "$@"
+        ;;
+
+    list)
+        list_all
+        ;;
+
+    doctor)
+        doctor
+        ;;
+
+    version|--version|-v)
+        version
+        ;;
+
+    uninstall)
+        uninstall
+        ;;
+
+    help|--help|-h)
+        usage
+        ;;
+
+    *)
+        echo "Unknown command: $COMMAND"
+        echo ""
+        usage
+        exit 1
+        ;;
+esac

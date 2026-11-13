@@ -1,0 +1,9 @@
+https://www.reddit.com/user/NoNames_World/
+
+Wow, c'est sympa !
+
+Tu l'as écrit avec quoi ?
+
+Aussi, ouvrir protontricks pour un jeu spécifique serait une commande utile. Tu peux ajouter beaucoup de choses, mais winetricks/protontricks fait déjà beaucoup, donc tu peux juste utiliser ça.
+
+Une autre chose à laquelle je pense en ce moment, c'est de changer le préfixe, de créer un nouveau préfixe, d'effacer le préfixe et de recommencer, et de gérer tout ce qui concerne le préfixe. De plus, changer la version de proton pour un jeu pourrait aussi être utile.
