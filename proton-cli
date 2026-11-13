@@ -1,8 +1,10 @@
 #!/bin/sh
+# Proton-CLI: run Windows programs with Proton from the command line.
+# https://github.com/Lh29007/ProtonCLI-Experiemental
 
 set -eu
 
-VERSION="0.6.0-exp"
+VERSION="0.7.0-exp"
 
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
     REAL_USER="$SUDO_USER"
@@ -13,7 +15,7 @@ else
 fi
 
 if [ -z "$REAL_HOME" ]; then
-    echo "proton-cli: unable to determine HOME."
+    echo "proton-cli: unable to determine HOME." >&2
     exit 1
 fi
 
@@ -22,18 +24,24 @@ CONFIG="$REAL_HOME/.config/proton-cli"
 
 RUNTIMES="$BASE/runtimes"
 PREFIXES="$BASE/prefixes"
-GAMES="$BASE/games"
 CACHE="$BASE/cache"
 LOGS="$BASE/logs"
+
+GAME_CONF="$CONFIG/games"
+DEFAULT_FILE="$CONFIG/runtime"
 
 GE_API="${PROTON_GE_API:-https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest}"
 DD_API="${PROTON_DROIDDECK_API:-https://api.github.com/repos/Droid-Deck/DroidDeck-Proton/releases/latest}"
 
 die()
 {
-    echo ""
-    echo "proton-cli: $*" >&2
+    printf 'proton-cli: %s\n' "$*" >&2
     exit 1
+}
+
+warn()
+{
+    printf '[!] %s\n' "$*"
 }
 
 require()
@@ -50,52 +58,55 @@ usage()
     echo "Usage:"
     echo ""
     echo "  proton-cli install [auto|ge|droiddeck]"
-    echo "      Install a Proton runtime and make it the default."
-    echo "      auto       (default) arm64 -> DroidDeck-Proton, x86_64 -> GE-Proton"
+    echo "      Install the latest Proton runtime and make it the default."
+    echo "      auto       (default) aarch64 -> DroidDeck-Proton, x86_64 -> GE-Proton"
     echo "      ge         GE-Proton (x86_64 only)"
-    echo "      droiddeck  DroidDeck-Proton (arm64 only)"
-    echo "      PROTON_RUNTIME_URL=<archive.tar.gz> installs a specific archive"
-    echo "      instead of either source."
-    echo ""
-    echo "  proton-cli use <runtime>"
-    echo "      Choose the runtime used by 'run' (see: proton-cli list)"
+    echo "      droiddeck  DroidDeck-Proton (aarch64 only)"
+    echo "      PROTON_RUNTIME_URL=<archive.tar.gz> installs a specific archive."
     echo ""
     echo "  proton-cli update [auto|ge|droiddeck]"
-    echo "      Install the latest build from a source"
+    echo "      Same as install; does nothing if the latest release is installed."
+    echo ""
+    echo "  proton-cli use <runtime>"
+    echo "      Set the default runtime used by 'run'"
     echo ""
     echo "  proton-cli list"
-    echo "      List installed runtimes and prefixes"
+    echo "      List runtimes (default marked), prefixes and per-game settings"
     echo ""
     echo "  proton-cli remove <runtime>"
     echo "      Remove a runtime"
     echo ""
     echo "  proton-cli run <game.exe> [arguments]"
-    echo "      Run a Windows program with the default runtime"
+    echo "      Run a Windows program. Output is shown live and saved to a log."
+    echo ""
+    echo "  proton-cli config <game.exe> show"
+    echo "  proton-cli config <game.exe> runtime <name|default>"
+    echo "  proton-cli config <game.exe> wrapper <command|none>"
+    echo "      Per-game settings"
     echo ""
     echo "  proton-cli prefix <name>"
-    echo "      Create a Proton prefix"
+    echo "      Create a standalone Proton prefix"
+    echo ""
+    echo "  proton-cli reset <game.exe> [--yes]"
+    echo "      Delete the game's prefix so it is recreated on next run"
+    echo ""
+    echo "  proton-cli winetricks <game.exe> <verb>..."
+    echo "      Run winetricks inside the game's prefix (needs winetricks installed)"
     echo ""
     echo "  proton-cli doctor"
     echo "      Check the system"
     echo ""
     echo "  proton-cli version"
-    echo "      Display the version"
-    echo ""
     echo "  proton-cli uninstall"
-    echo "      Remove Proton-CLI completely"
     echo ""
     echo "Environment:"
-    echo "      PROTON_WRAPPER=<cmd>  launch Proton through <cmd> (e.g. FEX-Emu, box64)"
+    echo "  PROTON_WRAPPER=<cmd>   launch Proton through <cmd> (e.g. FEX-Emu, box64)"
+    echo "  GITHUB_TOKEN=<token>   authenticate GitHub API requests (higher rate limit)"
 }
 
 init_dirs()
 {
-    mkdir -p "$RUNTIMES"
-    mkdir -p "$PREFIXES"
-    mkdir -p "$GAMES"
-    mkdir -p "$CACHE"
-    mkdir -p "$LOGS"
-    mkdir -p "$CONFIG"
+    mkdir -p "$RUNTIMES" "$PREFIXES" "$CACHE" "$LOGS" "$CONFIG" "$GAME_CONF"
 }
 
 detect_arch()
@@ -115,21 +126,47 @@ detect_arch()
     esac
 }
 
+check_name()
+{
+    case "$1" in
+        ""|*/*|*..*)
+            die "Invalid name: '$1'"
+            ;;
+    esac
+}
+
 default_runtime_name()
 {
-    if [ -f "$CONFIG/runtime" ]; then
-        head -n 1 "$CONFIG/runtime"
+    if [ -f "$DEFAULT_FILE" ]; then
+        head -n 1 "$DEFAULT_FILE"
     fi
+    return 0
 }
 
 set_default_runtime()
 {
     init_dirs
-    printf '%s\n' "$1" > "$CONFIG/runtime"
+    printf '%s\n' "$1" > "$DEFAULT_FILE"
 }
 
-find_runtime()
+tag_of()
 {
+    head -n 1 "$1/.proton-cli-tag" 2>/dev/null || true
+}
+
+# Print the runtime directory to use: the wanted one if given, otherwise
+# the default, otherwise the first installed runtime.
+resolve_runtime()
+{
+    if [ -n "$1" ]; then
+        check_name "$1"
+        if [ ! -f "$RUNTIMES/$1/proton" ]; then
+            die "Runtime not found: $1 (see: proton-cli list)"
+        fi
+        printf '%s\n' "$RUNTIMES/$1"
+        return 0
+    fi
+
     DEFAULT_NAME="$(default_runtime_name)"
 
     if [ -n "$DEFAULT_NAME" ] && [ -f "$RUNTIMES/$DEFAULT_NAME/proton" ]; then
@@ -145,12 +182,72 @@ find_runtime()
         fi
     done
 
-    return 1
+    die "No Proton runtime installed. Run: proton-cli install"
 }
 
-# Download a GitHub API response to a file, or stop with an error.
-fetch_release_json()
+abspath()
 {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1"
+    else
+        (cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")")
+    fi
+}
+
+# Stable, collision-free key for a game: sanitized name plus a hash of its
+# full path, so two different setup.exe files never share a prefix.
+game_key()
+{
+    G_NAME="$(basename "$1")"
+    G_NAME="${G_NAME%.*}"
+    G_SAFE="$(printf '%s' "$G_NAME" | tr -c 'A-Za-z0-9._-' '_')"
+    G_HASH="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+    printf '%s-%s\n' "$G_SAFE" "$G_HASH"
+}
+
+conf_get()
+{
+    if [ -f "$1" ]; then
+        sed -n "s/^$2=//p" "$1" | head -n 1
+    fi
+    return 0
+}
+
+# Set KEY=VALUE in a config file; an empty value removes the key.
+conf_set()
+{
+    init_dirs
+    C_TMP="$1.tmp"
+
+    if [ -f "$1" ]; then
+        grep -v "^$2=" "$1" > "$C_TMP" || true
+    else
+        : > "$C_TMP"
+    fi
+
+    if [ -n "$3" ]; then
+        printf '%s=%s\n' "$2" "$3" >> "$C_TMP"
+    fi
+
+    mv "$C_TMP" "$1"
+}
+
+# Download URL to OUT. Sends GITHUB_TOKEN only to the GitHub API.
+fetch_url()
+{
+    case "$1" in
+        https://api.github.com/*)
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+                AUTH="Authorization: Bearer $GITHUB_TOKEN"
+            else
+                AUTH="Accept: application/vnd.github+json"
+            fi
+            ;;
+        *)
+            AUTH="Accept: */*"
+            ;;
+    esac
+
     if ! curl \
         --fail \
         --location \
@@ -158,20 +255,18 @@ fetch_release_json()
         --silent \
         --retry 3 \
         --connect-timeout 15 \
+        --header "$AUTH" \
         --output "$2" \
         "$1"
     then
         rm -f "$2"
-        die "Unable to contact GitHub ($1)."
+        return 1
     fi
 
-    if [ ! -s "$2" ]; then
-        rm -f "$2"
-        die "GitHub returned an empty response."
-    fi
+    return 0
 }
 
-# Print the tag_name of a release JSON file.
+# Print the tag_name of a GitHub release JSON file.
 release_tag()
 {
     sed -n \
@@ -194,20 +289,18 @@ install_ge()
     require curl
     require tar
     require gzip
-    require grep
-    require sed
-    require head
+    require file
+    require sha512sum
     require basename
-    require mkdir
-    require rm
-    require uname
-    require chmod
-    require find
+    require sed
+    require grep
+    require head
 
     init_dirs
 
     ARCH_NAME="$(detect_arch)"
     SOURCE="${1:-auto}"
+    CUSTOM=0
 
     echo ""
     echo "======================================"
@@ -218,15 +311,14 @@ install_ge()
 
     URL=""
     TAG=""
-    SHA_URL=""
+    JSON=""
 
     if [ -n "${PROTON_RUNTIME_URL:-}" ]; then
-        # Explicit archive. Skips the source lookup; the architecture is
-        # still checked after extraction.
         URL="$PROTON_RUNTIME_URL"
         TAG="custom"
+        CUSTOM=1
 
-        echo "[+] Using PROTON_RUNTIME_URL override:"
+        echo "[+] Using PROTON_RUNTIME_URL:"
         echo "    $URL"
         echo ""
     else
@@ -241,12 +333,12 @@ install_ge()
         case "$SOURCE" in
             ge)
                 if [ "$ARCH_NAME" = "aarch64" ]; then
-                    die "GE-Proton has no arm64 build. Use: proton-cli install droiddeck"
+                    die "GE-Proton has no aarch64 build. Use: proton-cli install droiddeck"
                 fi
                 ;;
             droiddeck)
                 if [ "$ARCH_NAME" != "aarch64" ]; then
-                    die "DroidDeck-Proton is arm64 only. Use: proton-cli install ge"
+                    die "DroidDeck-Proton is aarch64 only. Use: proton-cli install ge"
                 fi
                 ;;
             *)
@@ -255,38 +347,43 @@ install_ge()
         esac
 
         echo "[+] Source       : $SOURCE"
-        echo ""
         echo "[+] Contacting GitHub..."
 
         if [ "$SOURCE" = "droiddeck" ]; then
+            API="$DD_API"
             JSON="$CACHE/droiddeck.json"
-            fetch_release_json "$DD_API" "$JSON"
-
-            TAG="$(release_tag "$JSON")"
-            [ -n "$TAG" ] || die "Unable to determine the latest DroidDeck-Proton version."
-
-            URL="$(release_asset "$JSON" 'aarch64\.tar\.gz$')"
-            SHA_URL="$(release_asset "$JSON" 'aarch64\.sha512sum$')"
-
-            [ -n "$URL" ] || die "No DroidDeck-Proton arm64 archive in release $TAG."
         else
+            API="$GE_API"
             JSON="$CACHE/ge-proton.json"
-            fetch_release_json "$GE_API" "$JSON"
+        fi
 
-            TAG="$(release_tag "$JSON")"
-            [ -n "$TAG" ] || die "Unable to determine the latest GE-Proton version."
+        if ! fetch_url "$API" "$JSON"; then
+            die "Unable to contact GitHub ($API)."
+        fi
 
+        if [ ! -s "$JSON" ]; then
+            rm -f "$JSON"
+            die "GitHub returned an empty response."
+        fi
+
+        TAG="$(release_tag "$JSON")"
+
+        if [ -z "$TAG" ]; then
+            die "Unable to read the latest release tag from $SOURCE."
+        fi
+
+        if [ "$SOURCE" = "droiddeck" ]; then
+            URL="$(release_asset "$JSON" 'aarch64\.tar\.gz$')"
+        else
             URL="$(release_asset "$JSON" 'GE-Proton.*(x86_64|amd64).*\.tar\.gz$')"
+        fi
 
-            [ -n "$URL" ] || die "No GE-Proton x86_64 archive in release $TAG."
+        if [ -z "$URL" ]; then
+            die "No $SOURCE archive for $ARCH_NAME in release $TAG."
         fi
 
         echo "[+] Latest version : $TAG"
         echo ""
-    fi
-
-    if [ -z "$URL" ]; then
-        die "No Proton archive URL available for $ARCH_NAME."
     fi
 
     FILE="$(basename "$URL")"
@@ -308,25 +405,21 @@ install_ge()
             ;;
     esac
 
+    if [ "$CUSTOM" -eq 0 ] && [ -f "$DEST/proton" ] && [ "$(tag_of "$DEST")" = "$TAG" ]; then
+        ok_msg="already installed"
+        set_default_runtime "$NAME"
+        echo "[OK] $NAME is $ok_msg and is now the default runtime."
+        echo ""
+        return 0
+    fi
+
     if [ -f "$ARCHIVE" ] && [ -s "$ARCHIVE" ]; then
         echo "[+] Archive already downloaded."
     else
         echo "[+] Downloading..."
         echo ""
 
-        rm -f "$ARCHIVE"
-
-        if ! curl \
-            --fail \
-            --location \
-            --show-error \
-            --silent \
-            --retry 3 \
-            --connect-timeout 15 \
-            --output "$ARCHIVE" \
-            "$URL"
-        then
-            rm -f "$ARCHIVE"
+        if ! fetch_url "$URL" "$ARCHIVE"; then
             die "Download failed."
         fi
     fi
@@ -336,37 +429,27 @@ install_ge()
         die "Downloaded archive is empty."
     fi
 
-    if [ -n "$SHA_URL" ]; then
-        if command -v sha512sum >/dev/null 2>&1; then
-            SHA_FILE="$CACHE/$FILE.sha512sum"
+    # Checksum: the release's <name>.sha512sum, or <url>.sha512sum for a
+    # custom archive (optional there).
+    if [ "$CUSTOM" -eq 0 ]; then
+        SHA_URL="$(release_asset "$JSON" "/${NAME}\.sha512sum\$")"
+    else
+        SHA_URL="$URL.sha512sum"
+    fi
 
-            echo "[+] Downloading checksum..."
+    if [ -n "$SHA_URL" ] && fetch_url "$SHA_URL" "$ARCHIVE.sha512sum"; then
+        echo "[+] Verifying checksum..."
 
-            if ! curl \
-                --fail \
-                --location \
-                --show-error \
-                --silent \
-                --retry 3 \
-                --connect-timeout 15 \
-                --output "$SHA_FILE" \
-                "$SHA_URL"
-            then
-                rm -f "$SHA_FILE"
-                die "Checksum download failed."
-            fi
-
-            echo "[+] Verifying checksum..."
-
-            if ! (cd "$CACHE" && sha512sum -c "$FILE.sha512sum" >/dev/null 2>&1); then
-                rm -f "$ARCHIVE" "$SHA_FILE"
-                die "Checksum mismatch. The archive was removed; run install again."
-            fi
-
-            echo "[OK] Checksum matches."
-        else
-            echo "[!] sha512sum not found: checksum not verified."
+        if ! (cd "$CACHE" && sha512sum -c "$FILE.sha512sum" >/dev/null 2>&1); then
+            rm -f "$ARCHIVE" "$ARCHIVE.sha512sum"
+            die "Checksum mismatch. The archive was removed; run install again."
         fi
+
+        echo "[OK] Checksum matches."
+    elif [ "$CUSTOM" -eq 0 ]; then
+        die "Checksum unavailable for $FILE; refusing to install an unverified archive."
+    else
+        warn "No checksum available for this archive; it cannot be verified."
     fi
 
     echo ""
@@ -378,17 +461,12 @@ install_ge()
     fi
 
     echo "[OK] Archive is valid."
-
     echo "[+] Extracting..."
 
     rm -rf "$DEST"
     mkdir -p "$DEST"
 
-    if ! tar \
-        -xzf "$ARCHIVE" \
-        -C "$DEST" \
-        --strip-components=1
-    then
+    if ! tar -xzf "$ARCHIVE" -C "$DEST" --strip-components=1; then
         rm -rf "$DEST"
         die "Extraction failed."
     fi
@@ -405,32 +483,31 @@ install_ge()
         die "Wine executable not found."
     fi
 
-    if command -v file >/dev/null 2>&1; then
-        WINE_INFO="$(file "$WINE")"
+    WINE_INFO="$(file "$WINE")"
 
-        echo "[+] Wine binary:"
-        echo "    $WINE_INFO"
-        echo ""
+    echo "[+] Wine binary:"
+    echo "    $WINE_INFO"
+    echo ""
 
-        if [ "$ARCH_NAME" = "x86_64" ]; then
+    case "$ARCH_NAME" in
+        x86_64)
             if ! echo "$WINE_INFO" | grep -qi "x86-64"; then
                 rm -rf "$DEST"
                 die "Wine binary is not compatible with x86_64."
             fi
-        fi
-
-        if [ "$ARCH_NAME" = "aarch64" ]; then
+            ;;
+        aarch64)
             if ! echo "$WINE_INFO" | grep -qi "ARM aarch64"; then
                 rm -rf "$DEST"
                 die "Wine binary is not compatible with aarch64."
             fi
-        fi
+            ;;
+    esac
 
-        echo "[OK] Wine architecture matches $ARCH_NAME."
-    fi
+    echo "[OK] Wine architecture matches $ARCH_NAME."
 
-    chmod +x "$DEST/proton"
-    chmod +x "$WINE"
+    chmod +x "$DEST/proton" "$WINE"
+    printf '%s\n' "$TAG" > "$DEST/.proton-cli-tag"
 
     set_default_runtime "$NAME"
 
@@ -454,16 +531,7 @@ update_ge()
 use_runtime()
 {
     NAME="${1:-}"
-
-    if [ -z "$NAME" ]; then
-        die "Usage: proton-cli use <runtime>"
-    fi
-
-    case "$NAME" in
-        *..*|/*)
-            die "Invalid runtime name."
-            ;;
-    esac
+    check_name "$NAME"
 
     if [ ! -f "$RUNTIMES/$NAME/proton" ]; then
         die "Runtime not found: $NAME (see: proton-cli list)"
@@ -484,25 +552,19 @@ remove_runtime()
         die "Usage: proton-cli remove <runtime>"
     fi
 
-    case "$NAME" in
-        *..*|/*)
-            die "Invalid runtime name."
-            ;;
-    esac
+    check_name "$NAME"
 
-    TARGET="$RUNTIMES/$NAME"
-
-    if [ ! -d "$TARGET" ]; then
+    if [ ! -d "$RUNTIMES/$NAME" ]; then
         die "Runtime not found: $NAME"
     fi
 
     echo ""
     echo "[+] Removing: $NAME"
 
-    rm -rf "$TARGET"
+    rm -rf "${RUNTIMES:?}/${NAME:?}"
 
     if [ "$(default_runtime_name)" = "$NAME" ]; then
-        rm -f "$CONFIG/runtime"
+        rm -f "$DEFAULT_FILE"
         echo "[+] It was the default runtime; no default is set now."
     fi
 
@@ -517,11 +579,7 @@ create_prefix()
         die "Usage: proton-cli prefix <name>"
     fi
 
-    case "$NAME" in
-        *..*|/*)
-            die "Invalid prefix name."
-            ;;
-    esac
+    check_name "$NAME"
 
     PREFIX="$PREFIXES/$NAME"
 
@@ -531,67 +589,166 @@ create_prefix()
         return 0
     fi
 
-    mkdir -p "$PREFIX"
     mkdir -p "$PREFIX/pfx"
 
     echo ""
-    echo "======================================"
-    echo " Prefix created"
-    echo "======================================"
-    echo ""
+    echo "[OK] Prefix created"
     echo "Name : $NAME"
     echo "Path : $PREFIX"
     echo ""
 }
 
-run_game()
+require_game()
 {
     if [ "$#" -lt 1 ]; then
-        die "Usage: proton-cli run <game.exe> [arguments]"
+        die "A game path is required."
     fi
 
-    GAME="$1"
+    if [ ! -f "$1" ]; then
+        die "File not found: $1"
+    fi
+
+    GAME="$(abspath "$1")"
+    GAME_KEY="$(game_key "$GAME")"
+    GAME_CONF_FILE="$GAME_CONF/$GAME_KEY.conf"
+    PREFIX="$PREFIXES/$GAME_KEY"
+}
+
+config_cmd()
+{
+    require_game "${1:-}"
     shift
 
-    if [ ! -f "$GAME" ]; then
-        die "File not found: $GAME"
+    ACTION="${1:-show}"
+
+    case "$ACTION" in
+        show)
+            echo ""
+            echo "Game     : $GAME"
+            echo "Key      : $GAME_KEY"
+            echo "Runtime  : $(conf_get "$GAME_CONF_FILE" runtime || true)"
+            echo "Wrapper  : $(conf_get "$GAME_CONF_FILE" wrapper || true)"
+            echo "Settings : $GAME_CONF_FILE"
+            echo ""
+            ;;
+        runtime)
+            VALUE="${2:-}"
+            if [ -z "$VALUE" ] || [ "$VALUE" = "default" ]; then
+                conf_set "$GAME_CONF_FILE" runtime ""
+                echo "[OK] Runtime for this game: default"
+            else
+                check_name "$VALUE"
+                if [ ! -f "$RUNTIMES/$VALUE/proton" ]; then
+                    die "Runtime not found: $VALUE (see: proton-cli list)"
+                fi
+                conf_set "$GAME_CONF_FILE" runtime "$VALUE"
+                echo "[OK] Runtime for this game: $VALUE"
+            fi
+            ;;
+        wrapper)
+            VALUE="${2:-}"
+            if [ -z "$VALUE" ] || [ "$VALUE" = "none" ]; then
+                conf_set "$GAME_CONF_FILE" wrapper ""
+                echo "[OK] Wrapper for this game: none"
+            else
+                conf_set "$GAME_CONF_FILE" wrapper "$VALUE"
+                echo "[OK] Wrapper for this game: $VALUE"
+            fi
+            ;;
+        *)
+            die "Usage: proton-cli config <game.exe> show|runtime <name>|wrapper <cmd>"
+            ;;
+    esac
+}
+
+reset_prefix()
+{
+    require_game "${1:-}"
+    shift
+
+    if [ "${1:-}" != "--yes" ]; then
+        printf 'Delete the prefix of %s? [y/N] ' "$GAME"
+        ANSWER=""
+        read -r ANSWER || true
+        case "$ANSWER" in
+            y|Y|yes|YES)
+                ;;
+            *)
+                echo "Aborted."
+                return 0
+                ;;
+        esac
     fi
 
-    RUNTIME="$(find_runtime || true)"
+    if [ -d "$PREFIX" ]; then
+        rm -rf "$PREFIX"
+        echo "[OK] Prefix removed: $PREFIX"
+    else
+        echo "[+] No prefix to remove for $GAME"
+    fi
+}
 
-    if [ -z "$RUNTIME" ]; then
-        die "No Proton runtime installed. Run: proton-cli install"
+winetricks_cmd()
+{
+    require_game "${1:-}"
+    shift
+
+    require winetricks
+
+    if [ "$#" -lt 1 ]; then
+        die "Usage: proton-cli winetricks <game.exe> <verb>..."
     fi
 
-    if [ "$(detect_arch)" = "aarch64" ] && [ -z "${PROTON_WRAPPER:-}" ]; then
+    RUNTIME="$(resolve_runtime "$(conf_get "$GAME_CONF_FILE" runtime || true)")"
+
+    mkdir -p "$PREFIX/pfx"
+
+    WINE="$RUNTIME/files/bin/wine"
+    if [ ! -x "$WINE" ]; then
+        die "Wine binary not found in runtime: $WINE"
+    fi
+
+    export WINE
+    export WINEPREFIX="$PREFIX/pfx"
+    if [ -x "$RUNTIME/files/bin/wineserver" ]; then
+        export WINESERVER="$RUNTIME/files/bin/wineserver"
+    fi
+
+    echo "[+] winetricks $* (prefix: $PREFIX/pfx)"
+    winetricks "$@"
+}
+
+run_game()
+{
+    require tee
+
+    require_game "$@"
+    shift
+
+    RUNTIME="$(resolve_runtime "$(conf_get "$GAME_CONF_FILE" runtime || true)")"
+
+    WRAPPER="$(conf_get "$GAME_CONF_FILE" wrapper || true)"
+    if [ -z "$WRAPPER" ]; then
+        WRAPPER="${PROTON_WRAPPER:-}"
+    fi
+
+    if [ "$(detect_arch)" = "aarch64" ] && [ -z "$WRAPPER" ]; then
         case "$(basename "$RUNTIME")" in
             *x86_64*|*x64*|*amd64*)
-                echo "[!] x86_64 runtime on arm64 without PROTON_WRAPPER: it will likely fail."
+                warn "x86_64 runtime on aarch64 without a wrapper: it will likely fail."
                 echo ""
                 ;;
         esac
     fi
 
-    if command -v realpath >/dev/null 2>&1; then
-        GAME="$(realpath "$GAME")"
-    else
-        GAME="$(cd "$(dirname "$GAME")" && pwd)/$(basename "$GAME")"
-    fi
-
-    GAME_NAME="$(basename "$GAME")"
-    GAME_NAME="${GAME_NAME%.*}"
-
-    PREFIX="$PREFIXES/$GAME_NAME"
-
-    mkdir -p "$PREFIX"
-    mkdir -p "$PREFIX/pfx"
-    mkdir -p "$LOGS"
+    mkdir -p "$PREFIX/pfx" "$LOGS"
 
     export STEAM_COMPAT_DATA_PATH="$PREFIX"
     export STEAM_COMPAT_CLIENT_INSTALL_PATH="$BASE"
     export WINEPREFIX="$PREFIX/pfx"
 
-    LOG="$LOGS/$GAME_NAME.log"
+    LOG="$LOGS/$GAME_KEY.log"
+    STATUS_FILE="$LOG.status"
 
     echo ""
     echo "======================================"
@@ -606,19 +763,19 @@ run_game()
 
     cd "$(dirname "$GAME")"
 
+    # Output is shown live and copied to the log. The exit status is written
+    # to a file because it is not available from the pipeline itself.
     set +e
-    if [ -n "${PROTON_WRAPPER:-}" ]; then
-        # Optional launcher placed in front of Proton, e.g. an x86 emulator
-        # such as FEX-Emu or box64 when running an x86_64 runtime on arm64.
+    (
+        set +e
         # shellcheck disable=SC2086
-        $PROTON_WRAPPER "$RUNTIME/proton" run "$GAME" "$@" >"$LOG" 2>&1
-    else
-        "$RUNTIME/proton" run "$GAME" "$@" >"$LOG" 2>&1
-    fi
-    STATUS=$?
+        $WRAPPER "$RUNTIME/proton" run "$GAME" "$@"
+        echo $? > "$STATUS_FILE"
+    ) 2>&1 | tee "$LOG"
     set -e
 
-    cat "$LOG"
+    STATUS="$(cat "$STATUS_FILE" 2>/dev/null || echo 1)"
+    rm -f "$STATUS_FILE"
 
     echo ""
 
@@ -642,9 +799,7 @@ list_all()
     echo " Proton-CLI"
     echo "======================================"
     echo ""
-
-    echo "Data:"
-    echo "  $BASE"
+    echo "Data: $BASE"
     echo ""
 
     echo "Runtimes:"
@@ -721,7 +876,7 @@ doctor()
     echo "Commands:"
     echo ""
 
-    for command in curl tar gzip file git sha512sum
+    for command in curl tar gzip file tee cksum sha512sum winetricks
     do
         if command -v "$command" >/dev/null 2>&1; then
             echo "  [OK] $command"
@@ -734,25 +889,29 @@ doctor()
     echo "Runtime:"
     echo ""
 
-    if RUNTIME="$(find_runtime 2>/dev/null)"; then
+    if RUNTIME="$(resolve_runtime "" 2>/dev/null)"; then
         echo "  [OK] $(basename "$RUNTIME")"
     else
         echo "  [ABSENT] No runtime"
     fi
 
-    echo "  Default  : $(default_runtime_name || true)"
+    echo "  Default  : $(default_runtime_name)"
 
     echo ""
-    echo "Overrides:"
+    echo "Settings:"
     echo ""
-    echo "  PROTON_RUNTIME_URL : ${PROTON_RUNTIME_URL:-<unset, source lookup>}"
+    echo "  PROTON_RUNTIME_URL : ${PROTON_RUNTIME_URL:-<unset>}"
     echo "  PROTON_WRAPPER     : ${PROTON_WRAPPER:-<unset>}"
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        echo "  GITHUB_TOKEN       : set"
+    else
+        echo "  GITHUB_TOKEN       : unset"
+    fi
 
     if [ "$ARCH_NAME" = "aarch64" ]; then
         echo ""
-        echo "Note: arm64 host. 'install' uses DroidDeck-Proton by default."
-        echo "An x86_64 runtime also needs PROTON_WRAPPER (FEX-Emu or box64)."
-        echo "The arm64 path is experimental and untested on real hardware."
+        echo "Note: aarch64 host. 'install' uses DroidDeck-Proton by default."
+        echo "x86_64 runtimes need PROTON_WRAPPER (FEX-Emu or box64)."
     fi
 
     echo ""
@@ -799,10 +958,6 @@ uninstall()
     echo "[OK] /usr/local/bin/proton-cli removed."
 
     echo ""
-    echo "======================================"
-    echo " Proton-CLI uninstalled"
-    echo "======================================"
-    echo ""
     echo "Steam Proton installations were not removed."
     echo "Your Steam games were not removed."
     echo ""
@@ -836,9 +991,24 @@ case "$COMMAND" in
         run_game "$@"
         ;;
 
+    config)
+        shift
+        config_cmd "$@"
+        ;;
+
     prefix)
         shift
         create_prefix "$@"
+        ;;
+
+    reset)
+        shift
+        reset_prefix "$@"
+        ;;
+
+    winetricks)
+        shift
+        winetricks_cmd "$@"
         ;;
 
     list)

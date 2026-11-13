@@ -1,37 +1,37 @@
-# Proton runtimes
+# Proton runtimes and prefixes (created under ~/.local/share/proton-cli)
 runtimes/
+prefixes/
 proton/
 proton-runtimes/
-
-# Wine / Proton prefixes
-prefixes/
-prefix/
 compatdata/
+prefix/
 
-# Téléchargements et archives
+# Downloads and archives
 cache/
 downloads/
 *.tar.gz
 *.tar.xz
 *.zip
 *.7z
+*.sha512sum
 
 # Logs
 logs/
 *.log
+*.log.status
 
-# Configurations locales
+# Local configuration
 config/
 *.local
 .env
 .env.*
 
-# Jeux / fichiers locaux
+# Games and game files (never commit them)
 games/
 *.exe
 *.msi
 
-# Cache / fichiers temporaires
+# Temporary files
 tmp/
 temp/
 *.tmp
@@ -43,19 +43,17 @@ __pycache__/
 .venv/
 venv/
 
-# Build
+# Build output
 build/
 dist/
 
-# IDE
+# Editors and OS files
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Shell backups
+# Backups
 *~
 *.bak
 

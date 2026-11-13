@@ -1,458 +1,199 @@
 # Proton-CLI
 
-> Run Windows games with Proton directly from the command line — without launching the Steam client.
+Run Windows programs with Proton from the command line, without starting Steam.
 
-**Proton-CLI** is a lightweight command-line launcher designed to run Windows applications and games using **Valve Proton** or compatible Proton builds such as **GE-Proton**.
+Proton-CLI is a POSIX shell launcher. It downloads a Proton runtime for your
+machine, creates one Wine prefix per program, and runs the program with that
+runtime. It works on **x86_64** and **aarch64 (arm64)** Linux.
 
-## Installation
+> Status: early development (`0.7.0-exp`). Commands and file layouts may still change.
 
-### Quick Install
+---
 
-Simply run:
+## Install
+
+The installer downloads a pinned release, verifies its SHA-256 checksum and
+installs `proton-cli` into `/usr/local/bin`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Lh29007/ProtonCLI/main/install.sh -o install.sh
-chmod +x install.sh
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/Lh29007/ProtonCLI-Experiemental/v0.7.0-exp/install.sh | sudo sh
 ```
 
-The installer will automatically:
+It needs `curl`, `tar`, `gzip`, `file` and `sha256sum`. Missing dependencies are
+installed with `apt`, `dnf` or `pacman` when available.
 
-* Check for administrator privileges
-* Install the required dependencies
-* Download the latest Proton-CLI version
-* Verify the script syntax before installation
-* Install `proton-cli` to `/usr/local/bin`
-* Create the required Proton-CLI directories in the user's home directory
-
-### Verify the Installation
+To install from a local checkout, point the installer at the files:
 
 ```bash
-proton-cli version
+sudo env PROTON_CLI_URL="file://$PWD/proton-cli" \
+         PROTON_CLI_SHA_URL="file://$PWD/proton-cli.sha256" sh install.sh
 ```
 
-Run a system diagnostic with:
+## Quick start
 
 ```bash
-proton-cli doctor
+proton-cli doctor                   # check the system
+proton-cli install                  # download a runtime for this machine
+proton-cli run /path/to/game.exe    # run a program
 ```
 
-### Install GE-Proton
+## Runtimes by architecture
 
-Once Proton-CLI is installed:
+`proton-cli install` detects the machine architecture:
+
+| Host            | Default source                                                                 | Runtime name            |
+|-----------------|--------------------------------------------------------------------------------|-------------------------|
+| x86_64          | [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom/releases)      | `GE-Proton*-x86_64`     |
+| aarch64 (arm64) | [DroidDeck-Proton](https://github.com/Droid-Deck/DroidDeck-Proton/releases)    | `DroidDeck-Proton-*-aarch64` |
 
 ```bash
-proton-cli install
+proton-cli install                  # auto: picks the source for this machine
+proton-cli install ge               # GE-Proton (x86_64 only)
+proton-cli install droiddeck        # DroidDeck-Proton (aarch64 only)
+proton-cli update                   # install the latest release if it is newer
+proton-cli list                     # installed runtimes; the default is marked
+proton-cli use <runtime>            # choose the default runtime
+proton-cli remove <runtime>         # delete a runtime
 ```
 
-### Uninstall
+Every archive is checked against its `.sha512sum` before extraction. An archive
+without a checksum is refused, except for a custom `PROTON_RUNTIME_URL` archive,
+which is installed with a warning. The Wine binary in the archive must match the
+machine's architecture.
 
-To completely remove Proton-CLI:
+## Running programs
 
 ```bash
-sudo proton-cli uninstall
+proton-cli run game.exe [arguments]
 ```
 
+- Output is shown live and saved to `~/.local/share/proton-cli/logs/<game>.log`.
+- The program's exit status is returned by `proton-cli`.
+- Each game gets its own prefix. Prefix names include a hash of the full path, so
+  two different `setup.exe` files never share one.
 
-
-The goal is simple: make Proton usable outside the Steam graphical interface while keeping the experience fast, scriptable and easy to use.
-
-> 🚧 **Status: Early development**
->
-> Proton-CLI is currently experimental. Features, commands and configuration formats may change.
-
----
-
-## ✨ Features
-
-* 🎮 Run Windows `.exe` applications with Proton
-* ⚡ Command-line focused
-* 🧩 Support for GE-Proton runtimes
-* 📦 Automatic Proton runtime installation
-* 🗂️ Separate Wine/Proton prefixes for games
-* 📝 Per-game logs
-* 🔍 Dependency and environment diagnostics
-* 🐧 Designed for Linux
-* 💻 Works independently from the Steam graphical client
-
----
-
-## 🚀 Quick Start
-
-Clone the repository:
+### Per-game settings
 
 ```bash
-git clone https://github.com/Lh29007/proton-cli.git
-cd proton-cli
+proton-cli config game.exe show
+proton-cli config game.exe runtime <name>      # use a specific runtime for this game
+proton-cli config game.exe runtime default     # back to the default runtime
+proton-cli config game.exe wrapper <command>   # e.g. an emulator, see below
+proton-cli config game.exe wrapper none
 ```
 
-Make the launcher executable:
+Settings are stored in `~/.config/proton-cli/games/`.
+
+### Prefixes and Winetricks
 
 ```bash
-chmod +x proton-cli
+proton-cli prefix <name>                # create a standalone prefix
+proton-cli reset game.exe               # delete the game's prefix (asks first)
+proton-cli reset game.exe --yes         # delete without asking
+proton-cli winetricks game.exe corefonts vcrun2019
 ```
 
-Check your system:
+`winetricks` must be installed separately. It runs inside the game's prefix with
+the runtime's own Wine.
+
+## arm64 and x86_64 runtimes on arm64
+
+On an arm64 host, DroidDeck-Proton runs natively. An **x86_64** runtime needs an
+x86 emulator in front of Proton. Set one globally or per game:
 
 ```bash
-./proton-cli doctor
+PROTON_WRAPPER="box64" proton-cli run game.exe
+proton-cli config game.exe wrapper "FEX-Emu"
 ```
 
-Install a Proton runtime:
+`run` warns when it finds an x86_64 runtime on arm64 with no wrapper configured.
+
+## Environment variables
+
+| Variable               | Purpose                                                                  |
+|------------------------|--------------------------------------------------------------------------|
+| `PROTON_RUNTIME_URL`   | Install this Proton `.tar.gz` instead of a release. Checksum optional.   |
+| `PROTON_WRAPPER`       | Command placed in front of Proton (default for all games).               |
+| `GITHUB_TOKEN`         | Authenticate GitHub API calls (raises the rate limit).                   |
+| `PROTON_GE_API`, `PROTON_DROIDDECK_API` | Override release API URLs (used by the tests).             |
+
+## Files
+
+| Path                                  | Content                              |
+|---------------------------------------|--------------------------------------|
+| `~/.local/share/proton-cli/runtimes/` | Installed runtimes                   |
+| `~/.local/share/proton-cli/prefixes/` | Wine prefixes, one per game          |
+| `~/.local/share/proton-cli/cache/`    | Downloaded archives and checksums    |
+| `~/.local/share/proton-cli/logs/`     | Per-game logs                        |
+| `~/.config/proton-cli/runtime`        | Default runtime name                 |
+| `~/.config/proton-cli/games/`         | Per-game settings                    |
+
+Runtimes, prefixes, caches, logs and games are never stored in the repository.
+
+## Commands
+
+```
+install [auto|ge|droiddeck]     update [auto|ge|droiddeck]
+use <runtime>                   list
+remove <runtime>                run <game.exe> [args]
+config <game.exe> show|runtime <name|default>|wrapper <cmd|none>
+prefix <name>                   reset <game.exe> [--yes]
+winetricks <game.exe> <verb>... doctor
+version                         uninstall
+```
+
+## Tests
 
 ```bash
-./proton-cli install
+bash tests/run-tests.sh
 ```
 
-Then run a Windows executable:
+The suite runs offline. It starts a local HTTP server that serves fake GitHub
+releases, fake Proton archives (with real ELF headers for x86-64 and aarch64) and
+checksums. An arm64 host is simulated with a `uname` shim, so both code paths run
+on any machine. The suite also lints the scripts with `shellcheck` when it is
+installed. CI runs the lint and the tests on x86_64 and native arm64 runners.
+
+## Release
+
+The installer is pinned to a tag and checks a SHA-256 file published with it:
 
 ```bash
-./proton-cli run /path/to/game.exe
+sh -n proton-cli && sh -n install.sh && bash tests/run-tests.sh
+sha256sum proton-cli > proton-cli.sha256
+git add proton-cli proton-cli.sha256 install.sh
+git commit -m "Release vX.Y.Z"
+git tag vX.Y.Z && git push origin main vX.Y.Z
 ```
 
----
+`VERSION` must match in `proton-cli` and `install.sh`. The installer's default
+ref is `v$VERSION`, so bumping `VERSION` is enough. The tests fail if
+`proton-cli.sha256` is stale.
 
-## 🎮 Example
+## Known limits
 
-For example:
+- The aarch64 path, including the DroidDeck-Proton archive layout, has been tested
+  with fake archives only. It has not been checked on a real arm64 machine.
+- GE-Proton has no aarch64 build. On aarch64, use DroidDeck-Proton or
+  `PROTON_RUNTIME_URL`.
+- Game compatibility depends on the runtime, your GPU and drivers. Proton-CLI does
+  not fix game-specific problems.
+- Steam game detection, GUI and runtime-per-profile features are not implemented yet.
+  See [docs/ideas.txt](docs/ideas.txt).
 
-```bash
-./proton-cli run "/path/to/DELTARUNE.exe"
-```
+## Contributing
 
-Proton-CLI creates an isolated prefix for the game and launches it through the selected Proton runtime.
+1. Run the tests and the linters before you open a pull request.
+2. Keep the scripts POSIX `sh` (`proton-cli`, `install.sh`).
+3. Never commit runtimes, prefixes, logs or game files.
 
-Example output:
+## Disclaimer
 
-```text
-======================================
-             Proton-CLI
-======================================
+Proton-CLI is an independent community project. It is not affiliated with or
+endorsed by Valve Corporation. Proton is developed by Valve and contributors.
+Proton-CLI does not redistribute Steam game files. Use only games and software
+you have the right to use.
 
-Runtime : GE-Proton11-6-x86_64
-Game    : /path/to/DELTARUNE.exe
-Prefix  : ./prefixes/DELTARUNE
-Log     : ./logs/DELTARUNE.log
+## License
 
-fsync: up and running.
-```
-
----
-
-## 🦾 Architecture and runtime choice
-
-`proton-cli install` detects the machine architecture and picks a matching runtime:
-
-| Host | Default source | Runtime |
-|---|---|---|
-| x86_64 | GE-Proton | `GE-Proton*-x86_64` |
-| aarch64 (arm64) | [DroidDeck-Proton](https://github.com/Droid-Deck/DroidDeck-Proton/releases) | `DroidDeck-Proton-*-aarch64` |
-
-```bash
-./proton-cli install                 # auto: detects x86_64 or aarch64
-./proton-cli install ge              # GE-Proton (x86_64 only)
-./proton-cli install droiddeck       # DroidDeck-Proton (arm64 only)
-./proton-cli list                    # installed runtimes, default marked
-./proton-cli use <runtime>           # choose the runtime used by `run`
-```
-
-The chosen runtime is stored in `~/.config/proton-cli/runtime`. The most recently installed runtime becomes the default. The DroidDeck archive is checked against its `.sha512sum` file before extraction.
-
-Other options:
-
-* `PROTON_RUNTIME_URL` — install a specific Proton `.tar.gz` instead of a source. It must contain `proton` and `files/bin/wine`, and the Wine binary must match the host architecture.
-* `PROTON_WRAPPER` — a command placed in front of Proton at launch, for example FEX-Emu or box64 to run an **x86_64** runtime on arm64. `run` warns when an x86_64 runtime is selected on arm64 without it.
-
-`proton-cli doctor` shows the default runtime and both overrides.
-
-> The arm64 path has only been tested with fake archives and a simulated architecture on x86_64. It has **not** been validated with a real DroidDeck-Proton install on an arm64 machine.
-
----
-
-## 🧰 Commands
-
-The command interface is currently evolving.
-
-### `doctor`
-
-Check the local environment and required dependencies:
-
-```bash
-./proton-cli doctor
-```
-
-Example:
-
-```text
-✓ wine
-✓ git
-✓ wget
-✓ Runtime directory
-✓ Prefix directory
-
-Architecture: x86_64
-Kernel: Linux
-```
-
----
-
-### `install`
-
-Download and install a compatible Proton runtime:
-
-```bash
-./proton-cli install
-```
-
-The installer detects the system architecture and downloads the appropriate runtime.
-
----
-
-### `list`
-
-List installed Proton runtimes:
-
-```bash
-./proton-cli list
-```
-
----
-
-### `run`
-
-Run a Windows executable:
-
-```bash
-./proton-cli run "/path/to/game.exe"
-```
-
-Proton-CLI automatically creates or reuses a prefix for the application.
-
----
-
-## 📁 Directory Structure
-
-A typical Proton-CLI installation looks like:
-
-```text
-proton-cli/
-├── proton-cli
-├── proton-setup.sh
-├── README.md
-├── .gitignore
-│
-├── runtimes/
-│   └── GE-Proton11-6-x86_64/
-│
-├── prefixes/
-│   └── DELTARUNE/
-│
-├── cache/
-│
-└── logs/
-    └── DELTARUNE.log
-```
-
-Runtime files, prefixes, caches and logs are local files and should **not** be committed to Git.
-
----
-
-## 🧩 Proton Runtimes
-
-Proton-CLI is designed to work with Proton-compatible runtimes.
-
-Examples include:
-
-* Valve Proton
-* GE-Proton
-* Other compatible Proton builds
-
-The runtime is responsible for the actual Windows compatibility layer.
-
-Proton-CLI acts as the command-line launcher and management layer around it.
-
----
-
-## 🗂️ Prefixes
-
-Each game can have its own Proton/Wine prefix.
-
-For example:
-
-```text
-prefixes/
-└── DELTARUNE/
-```
-
-This keeps the Windows environment of one game separate from another.
-
-Prefixes can contain:
-
-* Windows registry files
-* Wine configuration
-* Installed Windows components
-* Application-specific data
-
-Because prefixes can become large, they are ignored by Git.
-
----
-
-## 📝 Logs
-
-Game logs are stored in:
-
-```text
-logs/
-```
-
-For example:
-
-```text
-logs/DELTARUNE.log
-```
-
-When a game fails to start, the log is one of the first things to check.
-
-```bash
-tail -100 logs/DELTARUNE.log
-```
-
----
-
-## 🖥️ Requirements
-
-Proton-CLI is currently intended for Linux systems.
-
-Typical requirements include:
-
-* Linux
-* `bash` / POSIX shell
-* `wget` or `curl`
-* `git`
-* Wine/Proton dependencies
-* Vulkan support for games requiring DirectX translation
-* An x86_64 system for x86_64 Proton builds
-
-Your GPU and graphics drivers must also support the technologies required by the game.
-
----
-
-## 🎯 Project Goals
-
-The long-term goal is to make Proton much easier to use outside Steam.
-
-Planned ideas include:
-
-* [ ] Automatic Steam game detection
-* [ ] Steam Flatpak detection
-* [ ] Automatic `.exe` discovery
-* [ ] Game profiles
-* [ ] Multiple Proton runtimes
-* [ ] Runtime switching
-* [ ] Automatic configuration
-* [ ] Better Vulkan/DXVK diagnostics
-* [ ] Prefix management
-* [ ] Game management commands
-* [ ] Performance profiles
-* [ ] Better error messages
-* [ ] Automatic updates
-* [ ] Optional GUI
-* [ ] Integration with `umu`
-* [ ] Screenshot and debugging utilities
-
----
-
-## ⚡ Why Proton-CLI?
-
-Steam provides an excellent graphical interface for Proton, but sometimes you simply want to run a Windows application from a terminal.
-
-For example:
-
-```bash
-proton-cli run game.exe
-```
-
-instead of opening a launcher first.
-
-This makes Proton easier to use for:
-
-* Scripts
-* Custom launchers
-* Desktop shortcuts
-* Game managers
-* Servers
-* Automation
-* Linux power users
-* Minimal environments
-
----
-
-## 🔬 Development
-
-This project is currently in an early stage.
-
-The architecture may change significantly as Proton-CLI evolves.
-
-If you want to experiment with the project:
-
-```bash
-git clone https://github.com/Lh29007/proton-cli.git
-cd proton-cli
-chmod +x proton-cli
-./proton-cli doctor
-```
-
-Bug reports, ideas and contributions are welcome.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome.
-
-Before submitting a pull request:
-
-1. Test your changes on Linux.
-2. Keep the shell scripts portable where possible.
-3. Avoid committing Proton runtimes or game prefixes.
-4. Keep generated files out of the repository.
-5. Explain what your change does.
-
----
-
-## ⚠️ Disclaimer
-
-Proton-CLI is an independent community project.
-
-It is **not affiliated with or endorsed by Valve Corporation**.
-
-Proton itself is developed by Valve and contributors.
-
-Proton-CLI does not redistribute proprietary Steam game files.
-
-Users are responsible for obtaining and using their own games and software legally.
-
----
-
-## 📜 License
-
-This project is released under the **MIT License**.
-
-See [`LICENSE`](LICENSE) for details.
-
----
-
-## ⭐ Support the Project
-
-If you find Proton-CLI useful:
-
-⭐ Star the repository
-🐛 Report bugs
-💡 Suggest features
-🔧 Contribute improvements
-
-Every contribution helps make Proton easier to use outside Steam.
-
----
-
-**Proton-CLI — Proton from the terminal.**
+MIT. See [LICENSE](LICENSE).
